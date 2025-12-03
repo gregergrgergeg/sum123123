@@ -25,39 +25,53 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 DATABASE_CHANNEL_ID = 1445810654341759158
 COMMANDS_INFO_CHANNEL_ID = 1445810211049836698
 
-# --- Account Status Checking Logic (from your provided script) ---
+# --- Account Status Checking Logic (Updated with new proxy) ---
 API_BASE = "https://api.proswapper.xyz/external"
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
 }
-# Using a few proxies from your list as a fallback
-PROXIES = ["45.89.53.245:3128", "66.36.234.130:1339", "45.167.126.1:8080"]
+# New proxy format from your request
+PROXIES = ["geo.iproyal.com:12321:FFCSEjg822t4ZQxe:oMLjrG7iivzkF1QQ_country-ca,us_streaming-1"]
 
-def get_api_response(url, timeout=8.0):
-    """Makes a request to the API, trying proxies if direct connection fails."""
+def get_api_response(url, timeout=15.0):
+    """Makes a request to the API, trying an authenticated proxy if direct connection fails."""
+    # First, try a direct connection
     try:
-        # First, try a direct connection
         resp = requests.get(url, headers=HEADERS, timeout=timeout)
         if resp.status_code in [200, 404]:
+            logger.info("Request successful with direct connection.")
             return resp
     except requests.RequestException as e:
         logger.warning(f"Direct connection failed: {e}. Trying proxies.")
 
-    # If direct connection fails, try proxies
-    shuffled_proxies = PROXIES.copy()
-    random.shuffle(shuffled_proxies)
-    for proxy in shuffled_proxies:
-        try:
-            proxy_url = f'http://{proxy}'
-            resp = requests.get(url, headers=HEADERS, proxies={'http': proxy_url, 'https': proxy_url}, timeout=timeout)
-            if resp.status_code in [200, 404]:
-                logger.info(f"Request successful with proxy: {proxy}")
-                return resp
-        except requests.RequestException:
-            logger.warning(f"Proxy {proxy} failed.")
-            continue
+    # If direct connection fails, try the authenticated proxy
+    if not PROXIES:
+        logger.error("API request failed and no proxies are configured.")
+        return None
+        
+    proxy_string = random.choice(PROXIES)
+    try:
+        # Parse the new proxy format: host:port:user:pass
+        parts = proxy_string.split(':')
+        host, port, user, pw = parts[0], parts[1], parts[2], ':'.join(parts[3:])
+        
+        proxy_url = f"http://{user}:{pw}@{host}:{port}"
+        
+        proxies_dict = {
+           'http': proxy_url,
+           'https': proxy_url
+        }
+        
+        resp = requests.get(url, headers=HEADERS, proxies=proxies_dict, timeout=timeout)
+        if resp.status_code in [200, 404]:
+            logger.info(f"Request successful with proxy: {host}")
+            return resp
+    except requests.RequestException as e:
+        logger.warning(f"Proxy {proxy_string.split(':')[0]} failed: {e}")
+    except IndexError:
+        logger.error(f"Proxy string '{proxy_string}' is in the wrong format. Should be host:port:user:pass")
             
     logger.error("API request failed completely after trying direct and all proxies.")
     return None
@@ -163,12 +177,15 @@ async def save_account(ctx, account_id: str):
     if await find_saved_message(db_channel, account_id):
         return await ctx.reply(f"⚠️ **Notice:** Account `{account_id}` is already saved.")
 
+    # **FIX:** Send a reply and store it in a variable to edit it later
+    msg_to_edit = await ctx.reply(f"🔍 Searching recent attachments for `{account_id}`...")
+    
     # Find the original line from a .txt attachment
-    await ctx.reply(f"🔍 Searching recent attachments for `{account_id}`...")
     found_data = await find_account_line_in_attachments(ctx, account_id)
     
     if not found_data:
-        return await ctx.message.edit(content=f"❌ **Error:** Could not find `{account_id}` in any recent .txt file attachments.")
+        # **FIX:** Edit the bot's own message, not the user's
+        return await msg_to_edit.edit(content=f"❌ **Error:** Could not find `{account_id}` in any recent .txt file attachments.")
 
     line_to_save = found_data["line"]
     source_message = found_data["message"]
@@ -183,7 +200,8 @@ async def save_account(ctx, account_id: str):
     embed.set_footer(text=f"AccountID: {account_id}")
     
     await db_channel.send(embed=embed)
-    await ctx.message.edit(content=f"✅ **Success!** Account `{account_id}` has been saved from the attached file.")
+    # **FIX:** Edit the bot's own message with the success status
+    await msg_to_edit.edit(content=f"✅ **Success!** Account `{account_id}` has been saved from the attached file.")
 
 @bot.command(name='c')
 async def check_account(ctx, account_id: str):
