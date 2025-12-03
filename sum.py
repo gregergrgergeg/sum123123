@@ -8,6 +8,7 @@ import requests
 import urllib.parse
 import logging
 import random
+import io
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -90,19 +91,26 @@ intents.message_content = True # Required to read message content
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Helper Functions ---
-async def find_message_with_id(ctx, account_id):
-    """Scans all text channels for a message containing the account ID."""
-    for channel in ctx.guild.text_channels:
-        # Check if bot has permission to read history in the channel
-        if not channel.permissions_for(ctx.guild.me).read_message_history:
-            continue
-        try:
-            async for message in channel.history(limit=500): # Scan last 500 messages
-                if account_id in message.content:
-                    return message
-        except discord.errors.Forbidden:
-            continue # Skip channels we can't access
+async def find_account_line_in_attachments(ctx, account_id):
+    """Scans recent messages for a .txt attachment and finds the account line."""
+    async for message in ctx.channel.history(limit=20):
+        if message.attachments:
+            for attachment in message.attachments:
+                if attachment.filename.endswith('.txt'):
+                    try:
+                        # Read the attachment content into a string
+                        file_content_bytes = await attachment.read()
+                        file_content = file_content_bytes.decode('utf-8')
+                        
+                        # Search for the line containing the AccountID
+                        for line in file_content.splitlines():
+                            if f"AccountID: {account_id}" in line:
+                                return {"line": line, "message": message}
+                    except Exception as e:
+                        logger.error(f"Failed to read or parse attachment {attachment.filename}: {e}")
+                        continue # Try next attachment or message
     return None
+
 
 async def find_saved_message(database_channel, account_id):
     """Finds a message in the database channel for a given account ID."""
@@ -128,7 +136,7 @@ async def on_ready():
     cmd_channel = bot.get_channel(COMMANDS_INFO_CHANNEL_ID)
     if cmd_channel:
         embed = discord.Embed(title="📜 Bot Commands List", color=discord.Color.blue())
-        embed.add_field(name="`!s <account_id>`", value="Saves an account to the database.", inline=False)
+        embed.add_field(name="`!s <account_id>`", value="Saves an account by finding it in a recently attached .txt file.", inline=False)
         embed.add_field(name="`!c <account_id>`", value="Checks if an account is saved.", inline=False)
         embed.add_field(name="`!r <account_id>`", value="Removes a saved account.", inline=False)
         embed.add_field(name="`!g <account_id>`", value="Gets the original info for a saved account.", inline=False)
@@ -143,7 +151,7 @@ async def on_ready():
 # --- Bot Commands ---
 @bot.command(name='s')
 async def save_account(ctx, account_id: str):
-    """Saves an account by finding its info and posting to the database channel."""
+    """Saves an account by finding its info in a .txt attachment and posting to the database channel."""
     if not _HEX32.match(account_id):
         return await ctx.reply("❌ **Error:** Invalid Account ID format.")
 
@@ -155,23 +163,27 @@ async def save_account(ctx, account_id: str):
     if await find_saved_message(db_channel, account_id):
         return await ctx.reply(f"⚠️ **Notice:** Account `{account_id}` is already saved.")
 
-    # Find the original message
-    msg_to_save = await find_message_with_id(ctx, account_id)
-    if not msg_to_save:
-        return await ctx.reply(f"❌ **Error:** Could not find any message containing `{account_id}`.")
+    # Find the original line from a .txt attachment
+    await ctx.reply(f"🔍 Searching recent attachments for `{account_id}`...")
+    found_data = await find_account_line_in_attachments(ctx, account_id)
+    
+    if not found_data:
+        return await ctx.message.edit(content=f"❌ **Error:** Could not find `{account_id}` in any recent .txt file attachments.")
+
+    line_to_save = found_data["line"]
+    source_message = found_data["message"]
 
     # Create embed and save to database channel
     embed = discord.Embed(
         title="✅ Account Saved",
-        description=f"Original message by {msg_to_save.author.mention} in {msg_to_save.channel.mention}",
+        description=f"Found in a file uploaded by {source_message.author.mention}.",
         color=discord.Color.green()
     )
-    # The content might be too long for a single field, so put it in description
-    embed.description += f"\n\n**Original Content:**\n```{msg_to_save.content[:1800]}```" # Truncate to be safe
+    embed.add_field(name="Original Line", value=f"```{line_to_save}```", inline=False)
     embed.set_footer(text=f"AccountID: {account_id}")
     
     await db_channel.send(embed=embed)
-    await ctx.reply(f"✅ **Success!** Account `{account_id}` has been saved.")
+    await ctx.message.edit(content=f"✅ **Success!** Account `{account_id}` has been saved from the attached file.")
 
 @bot.command(name='c')
 async def check_account(ctx, account_id: str):
@@ -218,8 +230,8 @@ async def get_account_info(ctx, account_id: str):
 
     saved_msg = await find_saved_message(db_channel, account_id)
     if saved_msg and saved_msg.embeds:
-        original_content = saved_msg.embeds[0].description.split("Original Content:```")[1].replace("```", "")
-        # Create a nice format
+        # Extract the line from the 'Original Line' field
+        original_content = saved_msg.embeds[0].fields[0].value.replace("```", "")
         reply_content = f"**Original Info for Account `{account_id}`:**\n```\n{original_content.strip()}\n```"
         await ctx.reply(reply_content)
     else:
