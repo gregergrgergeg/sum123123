@@ -20,7 +20,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 # Channel IDs from your request
-# This channel is for the master .txt file AND for saving embeds
 DATABASE_CHANNEL_ID = 1445810654341759158 
 COMMANDS_INFO_CHANNEL_ID = 1445810211049836698
 
@@ -78,11 +77,17 @@ async def load_data_from_database_file(channel):
                     temp_cache = {}
                     line_count = 0
                     id_regex = re.compile(r"AccountID:\s*([0-9a-fA-F]{32})", re.IGNORECASE)
-                    for line in file_content.splitlines():
-                        match = id_regex.search(line)
+                    
+                    blocks = file_content.split('----------------------------------------')
+
+                    for block in blocks:
+                        if not block.strip():
+                            continue
+                            
+                        match = id_regex.search(block)
                         if match:
                             account_id = match.group(1).lower()
-                            temp_cache[account_id] = line
+                            temp_cache[account_id] = block.strip()
                             line_count += 1
                     
                     account_data_cache = temp_cache
@@ -114,33 +119,27 @@ async def on_ready():
         embed.add_field(name="`!s <account_id>`", value="Saves an account from the pre-loaded master file.", inline=False)
         embed.add_field(name="`!c <account_id>`", value="Checks if an account is saved.", inline=False)
         embed.add_field(name="`!r <account_id>`", value="Removes a saved account.", inline=False)
-        embed.add_field(name="`!g <account_id>`", value="Gets the original info for a saved account.", inline=False)
-        embed.add_field(name="`!ss <account_id>`", value="Searches API to check if an account is active.", inline=False)
+        embed.add_field(name="`!g <account_id>`", value="Gets the full original info for a saved account.", inline=False)
+        embed.add_field(name="`!ss <account_id>`", value="Gets account info and a Fortnite Tracker link.", inline=False)
         embed.add_field(name="`!ch <channel_name>`", value="Creates a new text channel (requires 'Manage Channels' permission).", inline=False)
         await cmd_channel.purge(limit=10, check=lambda msg: msg.author == bot.user)
         await cmd_channel.send(embed=embed)
 
-@bot.event
-async def on_message(message):
-    """Event that triggers on every message."""
-    # Ignore messages from the bot itself
+@bot.listen('on_message')
+async def file_upload_listener(message):
+    """Listener that triggers on every message to check for file uploads."""
     if message.author.bot:
         return
 
-    # Check if the message is in the database channel and has a .txt attachment
     if message.channel.id == DATABASE_CHANNEL_ID and message.attachments:
         attachment = next((att for att in message.attachments if att.filename.endswith('.txt')), None)
         if attachment:
             logger.info("New .txt file detected in database channel. Reloading data...")
-            # Reload the data from the newest file
             loaded_count = await load_data_from_database_file(message.channel)
             if loaded_count > 0:
                 await message.channel.send(f"✅ **Auto-reloaded!** Memorized {loaded_count} accounts from `{attachment.filename}`.")
             else:
                  await message.channel.send(f"⚠️ **Notice:** Detected `{attachment.filename}` but failed to load any accounts from it.")
-
-    # Process commands after handling the event
-    await bot.process_commands(message)
 
 # --- Bot Commands ---
 @bot.command(name='s')
@@ -154,32 +153,52 @@ async def save_account(ctx, account_id: str):
     if not db_channel:
         return await ctx.reply("❌ **Error:** Database channel not found.")
 
-    # Check if already saved
     async for msg in db_channel.history(limit=200):
         if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
              return await ctx.reply(f"⚠️ **Notice:** Account `{account_id}` is already saved.")
 
-    # Find the line from the in-memory cache
-    line_to_save = account_data_cache.get(account_id)
+    account_block = account_data_cache.get(account_id)
     
-    if not line_to_save:
+    if not account_block:
         return await ctx.reply(f"❌ **Error:** Could not find `{account_id}` in memory. Make sure the master file has been uploaded.")
 
-    # Create embed and save to database channel
+    original_line = ""
+    for line in account_block.splitlines():
+        if "AccountID:" in line:
+            original_line = line
+            break
+            
     embed = discord.Embed(
         title="✅ Account Saved",
         description=f"Saved by {ctx.author.mention} from the master data file.",
         color=discord.Color.green()
     )
-    embed.add_field(name="Original Line", value=f"```{line_to_save}```", inline=False)
+    embed.add_field(name="Original Line", value=f"```{original_line}```", inline=False)
     embed.set_footer(text=f"AccountID: {account_id}")
     
     await db_channel.send(embed=embed)
     await ctx.reply(f"✅ **Success!** Account `{account_id}` has been saved.")
 
-# (The other commands: !c, !r, !g, !ss, !ch remain largely unchanged)
+
+@bot.command(name='g')
+async def get_account_info(ctx, account_id: str):
+    """Gets the full saved information for an account, including results."""
+    if not _HEX32.match(account_id.lower()):
+        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
+    account_id = account_id.lower()
+
+    account_block = account_data_cache.get(account_id)
+    
+    if account_block:
+        reply_content = f"**Full Info for Account `{account_id}`:**\n```\n{account_block}\n```"
+        return await ctx.reply(reply_content)
+        
+    await ctx.reply(f"❌ **Error:** Could not retrieve info for `{account_id}`. Is it in the master file?")
+
+
 @bot.command(name='c')
 async def check_account(ctx, account_id: str):
+    """Checks if an account is currently saved in the database."""
     if not _HEX32.match(account_id.lower()):
         return await ctx.reply("❌ **Error:** Invalid Account ID format.")
     account_id = account_id.lower()
@@ -188,11 +207,14 @@ async def check_account(ctx, account_id: str):
 
     async for msg in db_channel.history(limit=200):
         if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
-            return await ctx.reply(f"✅ **Found:** Account `{account_id}` is saved. View: {msg.jump_url}")
+            # **FIX:** Updated the success message as requested.
+            return await ctx.reply(f"✅ **Checked:** The account `{account_id}` has already been sent on.")
+            
     await ctx.reply(f"❌ **Not Found:** Account `{account_id}` has not been sent on.")
 
 @bot.command(name='r')
 async def remove_account(ctx, account_id: str):
+    """Removes an account from the database."""
     if not _HEX32.match(account_id.lower()):
         return await ctx.reply("❌ **Error:** Invalid Account ID format.")
     account_id = account_id.lower()
@@ -205,25 +227,10 @@ async def remove_account(ctx, account_id: str):
             return await ctx.reply(f"🗑️ **Success!** Account `{account_id}` has been removed.")
     await ctx.reply(f"❌ **Error:** Account `{account_id}` was not found in the database.")
 
-@bot.command(name='g')
-async def get_account_info(ctx, account_id: str):
-    if not _HEX32.match(account_id.lower()):
-        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
-    account_id = account_id.lower()
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if not db_channel: return await ctx.reply("❌ **Error:** Database channel not found.")
-
-    async for msg in db_channel.history(limit=200):
-        if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
-            original_content = msg.embeds[0].fields[0].value.replace("```", "")
-            reply_content = f"**Original Info for Account `{account_id}`:**\n```\n{original_content.strip()}\n```"
-            return await ctx.reply(reply_content)
-    await ctx.reply(f"❌ **Error:** Could not retrieve info for `{account_id}`. Is it saved?")
-
 @bot.command(name='ss')
 async def search_status(ctx, account_id: str):
+    """Gets account info and a Fortnite Tracker link."""
     msg = await ctx.reply(f"🔍 Searching for account status of `{account_id}`...")
-    # Using .get on the cache to avoid errors if the ID isn't found
     line = account_data_cache.get(account_id.lower(), "")
     name_match = re.search(r"Display Name:\s*(\S+)", line, re.IGNORECASE)
     display_name = name_match.group(1) if name_match else "N/A"
@@ -238,6 +245,7 @@ async def search_status(ctx, account_id: str):
 @bot.command(name='ch')
 @commands.has_permissions(manage_channels=True)
 async def create_channel(ctx, *, channel_name: str):
+    """Creates a new text channel. User must have 'Manage Channels' permission."""
     try:
         new_channel = await ctx.guild.create_text_channel(name=channel_name)
         await ctx.reply(f"✅ **Success!** Channel `#{new_channel.name}` has been created.")
