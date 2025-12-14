@@ -18,26 +18,23 @@ logger = logging.getLogger("account_tracker_bot")
 
 # -----------------------------------------------------------------------------
 # --- CONFIGURATION ---
-# Fill in all the placeholder values below with your actual information.
 # -----------------------------------------------------------------------------
 
-# --- Discord Bot Configuration ---
-# Your bot's token from the Discord Developer Portal
-DISCORD_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+# For Render: This is the ONLY variable you need to set in your
+# Render Environment Variables.
+# Key: DISCORD_BOT_TOKEN
+# Value: your_secret_bot_token
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
+# Edit the rest of these values directly here.
 # --- Channel & User IDs ---
-# The ID of the channel where you upload the master .txt file
-DATABASE_CHANNEL_ID = 123456789012345678
-# The ID of the channel where the bot posts its command list
-COMMANDS_INFO_CHANNEL_ID = 123456789012345678
+DATABASE_CHANNEL_ID = 1445810654341759158
+COMMANDS_INFO_CHANNEL_ID = 1445810211049836698
 
 # --- Epic Games Tracker ---
-# The user ID of the person who should receive the status update DMs
 EPIC_TRACK_USER_ID = 851862667823415347
 
 # --- Proswapper API Proxies ---
-# A list of your proxies.
-# Example: ["user:pass@host:port", "user2:pass2@host2:port"]
 PROXIES = ["geo.iproyal.com:12321:FFCSEjg822t4ZQxe:oMLjrG7iivzkF1QQ_country-ca,us_streaming-1"]
 
 # -----------------------------------------------------------------------------
@@ -47,13 +44,11 @@ PROXIES = ["geo.iproyal.com:12321:FFCSEjg822t4ZQxe:oMLjrG7iivzkF1QQ_country-ca,u
 
 # --- In-memory Caches ---
 account_data_cache = {}
-tracking_tasks = {} # Stores active Epic Games tracking tasks
+tracking_tasks = {}
 
 # --- API & Header Definitions ---
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
-
 EPIC_API_URL = "https://www.epicgames.com/help/api/account-recovery/status"
-# MODIFIED: Headers for the Epic Games request. Cookie is no longer needed.
 EPIC_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json;charset=utf-8",
@@ -61,7 +56,6 @@ EPIC_HEADERS = {
     "Origin": "https://www.epicgames.com",
     "Referer": "https://www.epicgames.com/help/en-US/recovery-status-check",
 }
-
 PROSWAPPER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
@@ -69,10 +63,7 @@ PROSWAPPER_HEADERS = {
 
 # --- Proswapper API Logic ---
 def get_api_response(url, timeout=15.0):
-    """Makes a request to the proswapper API, using an authenticated proxy."""
-    if not PROXIES:
-        logger.error("Proxy list is empty. Cannot make API request.")
-        return None
+    if not PROXIES: return None
     try:
         proxy_string = random.choice(PROXIES)
         parts = proxy_string.split(':')
@@ -80,40 +71,33 @@ def get_api_response(url, timeout=15.0):
         proxy_url = f"http://{user}:{pw}@{host}:{port}"
         proxies_dict = {'http': proxy_url, 'https': proxy_url}
         resp = requests.get(url, headers=PROSWAPPER_HEADERS, proxies=proxies_dict, timeout=timeout)
-        if resp.status_code in [200, 404]:
-            logger.info(f"Proswapper request successful with proxy: {host}")
-            return resp
+        if resp.status_code in [200, 404]: return resp
     except Exception as e:
         logger.error(f"Proswapper API request via proxy failed: {e}")
     return None
 
 # --- Epic Games Tracking Logic ---
 def get_epic_status_meaning(status):
-    """Interprets the Epic Games status based on your definition."""
     status_lower = (status or "").lower()
     if "denied" in status_lower: return "Good"
     if "recover" in status_lower or "appeal_in_progress" in status_lower: return "Bad"
     return "Unknown"
 
-# MODIFIED: This task now runs without needing any cookie.
 async def track_epic_status(bot, recovery_id):
-    """Background task to check Epic Games status and DM on change."""
     last_status = None
     try:
         target_user = await bot.fetch_user(EPIC_TRACK_USER_ID)
     except discord.NotFound:
-        logger.error(f"Could not find the user to DM with ID {EPIC_TRACK_USER_ID}. Stopping task.")
+        logger.error(f"Could not find user with ID {EPIC_TRACK_USER_ID}. Stopping task.")
         return
 
     while True:
         try:
             payload = {"recoveryId": recovery_id}
             response = requests.post(EPIC_API_URL, headers=EPIC_HEADERS, json=payload, timeout=20)
-            
             if response.status_code == 200:
                 current_data = response.json()
                 current_status = current_data.get("currentRecovery", {}).get("aggregatedStatus")
-                
                 if current_status != last_status:
                     logger.info(f"Epic status change for {recovery_id}: from '{last_status}' to '{current_status}'")
                     status_meaning = get_epic_status_meaning(current_status)
@@ -123,15 +107,12 @@ async def track_epic_status(bot, recovery_id):
                     await target_user.send(embed=embed)
                     last_status = current_status
             else:
-                 logger.error(f"Epic API returned status {response.status_code}. It might require a cookie again in the future.")
-                 # No need to stop the task, just log the error and it will retry in an hour.
-
+                logger.error(f"Epic API returned status {response.status_code}.")
         except requests.RequestException as e:
             logger.error(f"Request failed for Epic Games tracker: {e}")
         except Exception as e:
-            logger.error(f"An unexpected error occurred in the tracking task for {recovery_id}: {e}")
-
-        await asyncio.sleep(3600)  # Wait for 1 hour
+            logger.error(f"An unexpected error in tracking task for {recovery_id}: {e}")
+        await asyncio.sleep(3600)
 
     if recovery_id in tracking_tasks:
         del tracking_tasks[recovery_id]
@@ -144,13 +125,11 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_data_from_database_file(channel):
-    # This function is unchanged
     global account_data_cache
-    logger.info("Searching for master data file in database channel...")
+    logger.info("Searching for master data file...")
     async for message in channel.history(limit=100):
         if message.attachments:
-            attachment = next((att for att in message.attachments if att.filename.endswith('.txt')), None)
-            if attachment:
+            if attachment := next((att for att in message.attachments if att.filename.endswith('.txt')), None):
                 try:
                     file_content = await attachment.read()
                     temp_cache, id_regex = {}, re.compile(r"AccountID:\s*([0-9a-fA-F]{32})", re.IGNORECASE)
@@ -158,20 +137,18 @@ async def load_data_from_database_file(channel):
                         if match := id_regex.search(block):
                             temp_cache[match.group(1).lower()] = block.strip()
                     account_data_cache = temp_cache
-                    logger.info(f"Successfully loaded {len(temp_cache)} accounts from {attachment.filename}.")
+                    logger.info(f"Loaded {len(temp_cache)} accounts from {attachment.filename}.")
                     return len(temp_cache)
                 except Exception as e:
                     logger.error(f"Failed to parse master data file {attachment.filename}: {e}")
     return 0
-    
+
 # --- Bot Events & Commands ---
 @bot.event
 async def on_ready():
     logger.info(f'Logged in as {bot.user.name}')
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if db_channel: await load_data_from_database_file(db_channel)
-    cmd_channel = bot.get_channel(COMMANDS_INFO_CHANNEL_ID)
-    if cmd_channel:
+    if db_channel := bot.get_channel(DATABASE_CHANNEL_ID): await load_data_from_database_file(db_channel)
+    if cmd_channel := bot.get_channel(COMMANDS_INFO_CHANNEL_ID):
         embed = discord.Embed(title="📜 Bot Commands List", color=discord.Color.blue())
         embed.add_field(name="`!s <account_id>`", value="Saves an account from the master file.", inline=False)
         embed.add_field(name="`!c <account_id>`", value="Checks if an account is saved.", inline=False)
@@ -183,7 +160,6 @@ async def on_ready():
         await cmd_channel.purge(limit=10, check=lambda msg: msg.author == bot.user)
         await cmd_channel.send(embed=embed)
 
-# (All other commands: !s, !g, !c, !r, !ss, !ch, file_upload_listener are unchanged and included below)
 @bot.listen('on_message')
 async def file_upload_listener(message):
     if message.author.bot or message.channel.id != DATABASE_CHANNEL_ID or not message.attachments: return
@@ -204,7 +180,7 @@ async def stoptrack_command(ctx, recovery_id: str):
     task.cancel()
     del tracking_tasks[recovery_id]
     await ctx.reply(f"🛑 **Stopped:** No longer tracking `{recovery_id}`.")
-    
+
 @bot.command(name='s')
 async def save_account(ctx, account_id: str):
     if not _HEX32.match(account_id.lower()): return await ctx.reply("❌ Invalid ID format.")
@@ -271,7 +247,7 @@ async def create_channel(ctx, *, channel_name: str):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    if "YOUR_BOT_TOKEN" in DISCORD_BOT_TOKEN or not DISCORD_BOT_TOKEN:
-        logger.critical("FATAL: DISCORD_BOT_TOKEN is not set in the configuration section.")
+    if not DISCORD_BOT_TOKEN:
+        logger.critical("FATAL: DISCORD_BOT_TOKEN environment variable is not set.")
     else:
         bot.run(DISCORD_BOT_TOKEN)
