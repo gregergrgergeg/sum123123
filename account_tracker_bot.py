@@ -1,262 +1,198 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import discord
 from discord.ext import commands
-import os
-import re
 import requests
-import urllib.parse
-import logging
-import random
-import io
+import json
+import os
+import time
+import datetime
+import asyncio
 
-# --- Basic Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("account_tracker_bot")
+# =================================================================================
+#  WARNING: RISK OF EPIC GAMES ACCOUNT BAN
+#  Automating gifting and other in-game actions is a violation of the Epic Games
+#  Terms of Service. Use this script at your own risk. All accounts involved
+#  (gifting and receiving) could be permanently banned without warning.
+# =================================================================================
 
 # --- Configuration ---
-from dotenv import load_dotenv
-load_dotenv()
-BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+ACCOUNTS_FILE = "saved_accounts.json"
+SF_STATE_FILE = "sf_state.json"
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN") # Get token from environment variables
 
-# Channel IDs from your request
-DATABASE_CHANNEL_ID = 1445810654341759158 
-COMMANDS_INFO_CHANNEL_ID = 1445810211049836698
+# API Constants
+BASIC_AUTH_HEADER = "basic MzRhMDJjZjhmNDQxNGUyOWIxNTkyMTg3NmRhMzZmOWE6ZGFhZmJkYmY3Mzc0NDUwOWE2ZTgyMmY3YjMxM2M3MmM="
+TOKEN_URL = "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token"
+FRIENDS_API_URL = "https://friends-public-service-prod.ol.epicgames.com/friends/api/v1/{account_id}/friends/{target_account_id}"
+ITEM_SHOP_URL = "https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/storefront/v2/catalog"
+GIFT_API_URL = "https://fortnite-public-service-prod11.ol.epicgames.com/fortnite/api/game/v2/profile/{account_id}/client/GiftCatalogEntry"
 
-# In-memory cache for the account data
-account_data_cache = {}
-
-# --- Account Status Checking Logic ---
-API_BASE = "https://api.proswapper.xyz/external"
-_HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
-}
-PROXIES = ["geo.iproyal.com:12321:FFCSEjg822t4ZQxe:oMLjrG7iivzkF1QQ_country-ca,us_streaming-1"]
-
-def get_api_response(url, timeout=15.0):
-    """Makes a request to the API, using an authenticated proxy."""
-    try:
-        proxy_string = random.choice(PROXIES)
-        parts = proxy_string.split(':')
-        host, port, user, pw = parts[0], parts[1], parts[2], ':'.join(parts[3:])
-        proxy_url = f"http://{user}:{pw}@{host}:{port}"
-        proxies_dict = {'http': proxy_url, 'https': proxy_url}
-        resp = requests.get(url, headers=HEADERS, proxies=proxies_dict, timeout=timeout)
-        if resp.status_code in [200, 404]:
-            logger.info(f"Request successful with proxy: {host}")
-            return resp
-    except Exception as e:
-        logger.error(f"API request via proxy failed: {e}")
-            
-    logger.error("API request failed completely.")
-    return None
-
-# --- Bot Setup & Data Loading ---
+# --- Bot Setup ---
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-async def load_data_from_database_file(channel):
-    """Finds the latest .txt file in the DB channel and loads it into memory."""
-    global account_data_cache
-    logger.info("Searching for master data file in database channel...")
-    async for message in channel.history(limit=100):
-        if message.attachments:
-            attachment = next((att for att in message.attachments if att.filename.endswith('.txt')), None)
-            if attachment:
-                logger.info(f"Found master data file: {attachment.filename}")
-                try:
-                    file_content_bytes = await attachment.read()
-                    file_content = file_content_bytes.decode('utf-8')
-                    
-                    temp_cache = {}
-                    line_count = 0
-                    id_regex = re.compile(r"AccountID:\s*([0-9a-fA-F]{32})", re.IGNORECASE)
-                    
-                    blocks = file_content.split('----------------------------------------')
+# --- CORE API & HELPER FUNCTIONS ---
 
-                    for block in blocks:
-                        if not block.strip():
-                            continue
-                            
-                        match = id_regex.search(block)
-                        if match:
-                            account_id = match.group(1).lower()
-                            temp_cache[account_id] = block.strip()
-                            line_count += 1
-                    
-                    account_data_cache = temp_cache
-                    logger.info(f"Successfully loaded {line_count} accounts into memory.")
-                    return line_count
-                except Exception as e:
-                    logger.error(f"Failed to read or parse master data file {attachment.filename}: {e}")
-                    return 0
-    logger.warning("No master .txt data file found in the database channel.")
-    return 0
+def load_json(filename):
+    if not os.path.exists(filename):
+        return {}
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
 
-# --- Bot Events ---
-@bot.event
-async def on_ready():
-    """Event for when the bot logs in and is ready."""
-    logger.info(f'Logged in as {bot.user.name}')
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if db_channel:
-        await load_data_from_database_file(db_channel)
-    else:
-        logger.error(f"Could not find Database Channel with ID {DATABASE_CHANNEL_ID}")
+def save_json(data, filename):
+    try:
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        return True
+    except IOError:
+        return False
 
-    activity = discord.CustomActivity(name="Smoking on a pack")
-    await bot.change_presence(activity=activity)
+async def refresh_access_token(account):
+    headers = {'Authorization': BASIC_AUTH_HEADER, 'Content-Type': 'application/x-www-form-urlencoded'}
+    data = {'grant_type': 'refresh_token', 'refresh_token': account['refresh_token']}
     
-    cmd_channel = bot.get_channel(COMMANDS_INFO_CHANNEL_ID)
-    if cmd_channel:
-        embed = discord.Embed(title="📜 Bot Commands List", color=discord.Color.blue())
-        embed.add_field(name="`!s <account_id>`", value="Saves an account from the pre-loaded master file.", inline=False)
-        embed.add_field(name="`!c <account_id>`", value="Checks if an account is saved.", inline=False)
-        embed.add_field(name="`!r <account_id>`", value="Removes a saved account.", inline=False)
-        embed.add_field(name="`!g <account_id>`", value="Gets the full original info for a saved account.", inline=False)
-        embed.add_field(name="`!ss <account_id>`", value="Gets account info and a Fortnite Tracker link.", inline=False)
-        embed.add_field(name="`!ch <channel_name>`", value="Creates a new text channel (requires 'Manage Channels' permission).", inline=False)
-        await cmd_channel.purge(limit=10, check=lambda msg: msg.author == bot.user)
-        await cmd_channel.send(embed=embed)
+    response = requests.post(TOKEN_URL, headers=headers, data=data)
+    
+    if response.status_code == 200:
+        token_data = response.json()
+        account['access_token'] = token_data['access_token']
+        account['refresh_token'] = token_data['refresh_token']
+        # Update accounts file
+        all_accounts = load_json(ACCOUNTS_FILE)
+        for i, acc in enumerate(all_accounts):
+            if acc['account_id'] == account['account_id']:
+                all_accounts[i] = account
+                break
+        save_json(all_accounts, ACCOUNTS_FILE)
+        return account, None
+    else:
+        error_message = f"Failed to refresh token for {account['displayName']}. Status: {response.status_code}. It may need re-authentication."
+        return None, error_message
 
-@bot.listen('on_message')
-async def file_upload_listener(message):
-    """Listener that triggers on every message to check for file uploads."""
-    if message.author.bot:
+def get_auth_headers(access_token):
+    return {'Authorization': f'bearer {access_token}', 'Content-Type': 'application/json'}
+
+async def get_item_shop(account):
+    # This function would be expanded to get the full item shop
+    # For now, it's a placeholder
+    return {"daily_emotes": [{"id": "eid_dancetherapy", "price": 800}]}
+
+async def check_user_has_item(account, target_user_id, item_id):
+    # CRITICAL NOTE: There is no public/reliable Epic Games API to check another user's locker.
+    # This is a major roadblock for the "don't gift duplicates" feature.
+    # This function is a placeholder and assumes the user does NOT have the item.
+    # In a real-world scenario, you might have to track gifted items manually in your sf_state.json.
+    return False
+
+async def gift_item(account, target_user_id, item_id):
+    # Placeholder for the complex gifting logic
+    # In reality, this would involve a multi-step profile query and command
+    print(f"SIMULATING: Gifting item {item_id} from {account['displayName']} to {target_user_id}")
+    return True, "Gift successful (simulation)"
+
+async def get_vbucks_balance(account):
+    # Placeholder for fetching V-Bucks balance
+    # This would typically be part of a larger "QueryProfile" call
+    return 1000 # Return a mock value for testing
+
+# --- BACKGROUND !SF LOGIC ---
+
+async def sf_logic(ctx, target_username):
+    """The main background task for the !sf command."""
+    await ctx.send(f"**`!sf` Background Task Started**\nTargeting user: `{target_username}`")
+
+    accounts = load_json(ACCOUNTS_FILE)
+    if not accounts:
+        await ctx.send("Error: `accounts.json` not found or is empty. Please add accounts first.")
         return
 
-    if message.channel.id == DATABASE_CHANNEL_ID and message.attachments:
-        attachment = next((att for att in message.attachments if att.filename.endswith('.txt')), None)
-        if attachment:
-            logger.info("New .txt file detected in database channel. Reloading data...")
-            loaded_count = await load_data_from_database_file(message.channel)
-            if loaded_count > 0:
-                await message.channel.send(f"✅ **Auto-reloaded!** Memorized {loaded_count} accounts from `{attachment.filename}`.")
-            else:
-                 await message.channel.send(f"⚠️ **Notice:** Detected `{attachment.filename}` but failed to load any accounts from it.")
+    # For this example, we'll assume the target_username is their Epic ID.
+    # A real implementation would need to look up the account ID from the username.
+    target_user_id = f"epic_id_for_{target_username}"
 
-# --- Bot Commands ---
-@bot.command(name='s')
-async def save_account(ctx, account_id: str):
-    """Saves an account by finding its info in the in-memory data cache."""
-    if not _HEX32.match(account_id.lower()):
-        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
+    # For simplicity, we'll skip the "Add Friend" and 3-day wait logic in this example.
+    # A real implementation would need to manage this state.
+    await ctx.send("Friend request and 3-day wait period are being simulated for this test.")
 
-    account_id = account_id.lower()
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if not db_channel:
-        return await ctx.reply("❌ **Error:** Database channel not found.")
-
-    async for msg in db_channel.history(limit=200):
-        if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
-             return await ctx.reply(f"⚠️ **Notice:** Account `{account_id}` is already saved.")
-
-    account_block = account_data_cache.get(account_id)
+    # --- Main Gifting Loop ---
+    # This loop would be run on a schedule (e.g., daily) in a real application.
+    await ctx.send("--- Starting Gifting Cycle ---")
     
-    if not account_block:
-        return await ctx.reply(f"❌ **Error:** Could not find `{account_id}` in memory. Make sure the master file has been uploaded.")
+    # 1. Get the item shop
+    shop_data = await get_item_shop(accounts[0]) # Use first account to check the shop
+    emotes_to_gift = shop_data.get('daily_emotes', [])
 
-    original_line = ""
-    for line in account_block.splitlines():
-        if "AccountID:" in line:
-            original_line = line
-            break
-            
-    embed = discord.Embed(
-        title="✅ Account Saved",
-        description=f"Saved by {ctx.author.mention} from the master data file.",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Original Line", value=f"```{original_line}```", inline=False)
-    embed.set_footer(text=f"AccountID: {account_id}")
-    
-    await db_channel.send(embed=embed)
-    await ctx.reply(f"✅ **Success!** Account `{account_id}` has been saved.")
+    if not emotes_to_gift:
+        await ctx.send("No emotes found in the item shop today.")
+        return
 
-
-@bot.command(name='g')
-async def get_account_info(ctx, account_id: str):
-    """Gets the full saved information for an account, including results."""
-    if not _HEX32.match(account_id.lower()):
-        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
-    account_id = account_id.lower()
-
-    account_block = account_data_cache.get(account_id)
-    
-    if account_block:
-        reply_content = f"**Full Info for Account `{account_id}`:**\n```\n{account_block}\n```"
-        return await ctx.reply(reply_content)
+    for emote in emotes_to_gift:
+        emote_id = emote['id']
+        emote_price = emote['price']
         
-    await ctx.reply(f"❌ **Error:** Could not retrieve info for `{account_id}`. Is it in the master file?")
+        await ctx.send(f"Checking emote `{emote_id}` (Price: {emote_price} V-Bucks)...")
+
+        # 2. Check if target already has the item
+        already_owned = await check_user_has_item(accounts[0], target_user_id, emote_id)
+        if already_owned:
+            await ctx.send(f"-> Target already owns `{emote_id}`. Skipping.")
+            continue
+
+        # 3. Find an account to gift from
+        gift_sent = False
+        for account in accounts:
+            refreshed_account, error = await refresh_access_token(account)
+            if error:
+                await ctx.send(f"-> Skipping account `{account['displayName']}`: {error}")
+                continue
+
+            vbucks = await get_vbucks_balance(refreshed_account)
+            if vbucks >= emote_price:
+                await ctx.send(f"-> Attempting to gift `{emote_id}` from `{refreshed_account['displayName']}` ({vbucks} V-Bucks)...")
+                success, message = await gift_item(refreshed_account, target_user_id, emote_id)
+                await ctx.send(f"--> {message}")
+                if success:
+                    gift_sent = True
+                    break # Stop trying to gift this emote, move to the next one
+            else:
+                await ctx.send(f"-> Insufficient V-Bucks in `{refreshed_account['displayName']}` ({vbucks} V-Bucks).")
+
+        if not gift_sent:
+            await ctx.send(f"Could not gift emote `{emote_id}`. No available account had enough V-Bucks.")
+
+    await ctx.send("\n**`!sf` Gifting Cycle Complete**")
 
 
-@bot.command(name='c')
-async def check_account(ctx, account_id: str):
-    """Checks if an account is currently saved in the database."""
-    if not _HEX32.match(account_id.lower()):
-        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
-    account_id = account_id.lower()
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if not db_channel: return await ctx.reply("❌ **Error:** Database channel not found.")
+# --- DISCORD COMMANDS ---
 
-    async for msg in db_channel.history(limit=200):
-        if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
-            # **FIX:** Updated the success message as requested.
-            return await ctx.reply(f"✅ **Checked:** The account `{account_id}` has already been sent on.")
-            
-    await ctx.reply(f"❌ **Not Found:** Account `{account_id}` has not been sent on.")
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user.name}')
+    print('Bot is ready to receive commands.')
 
-@bot.command(name='r')
-async def remove_account(ctx, account_id: str):
-    """Removes an account from the database."""
-    if not _HEX32.match(account_id.lower()):
-        return await ctx.reply("❌ **Error:** Invalid Account ID format.")
-    account_id = account_id.lower()
-    db_channel = bot.get_channel(DATABASE_CHANNEL_ID)
-    if not db_channel: return await ctx.reply("❌ **Error:** Database channel not found.")
+@bot.command(name='sf')
+async def sf_command(ctx, target_username: str = None):
+    """
+    Starts the automated emote gifting service for a target user.
+    Usage: !sf <EpicGamesUsername>
+    """
+    if not target_username:
+        await ctx.send("Please provide the Epic Games username of the person you want to gift to.\n**Usage:** `!sf TheTargetPlayer`")
+        return
 
-    async for msg in db_channel.history(limit=200):
-        if msg.embeds and msg.embeds[0].footer and account_id in msg.embeds[0].footer.text.lower():
-            await msg.delete()
-            return await ctx.reply(f"🗑️ **Success!** Account `{account_id}` has been removed.")
-    await ctx.reply(f"❌ **Error:** Account `{account_id}` was not found in the database.")
-
-@bot.command(name='ss')
-async def search_status(ctx, account_id: str):
-    """Gets account info and a Fortnite Tracker link."""
-    msg = await ctx.reply(f"🔍 Searching for account status of `{account_id}`...")
-    line = account_data_cache.get(account_id.lower(), "")
-    name_match = re.search(r"Display Name:\s*(\S+)", line, re.IGNORECASE)
-    display_name = name_match.group(1) if name_match else "N/A"
+    # Acknowledge the command immediately
+    await ctx.send(f"✅ **`!sf` command received for `{target_username}`.**\nStarting the gifting process in the background. I will post updates in this channel.")
     
-    tracker_link = f"https://fortnitetracker.com/profile/all/{urllib.parse.quote(display_name)}"
-    
-    embed = discord.Embed(title=f"🔎 Account Info: {display_name}", color=discord.Color.blue())
-    embed.add_field(name="Account ID", value=account_id, inline=False)
-    embed.add_field(name="🔗 Links", value=f"[Fortnite Tracker]({tracker_link})", inline=False)
-    await msg.edit(content=None, embed=embed)
+    # Start the long-running logic as a background task
+    asyncio.create_task(sf_logic(ctx, target_username))
 
-@bot.command(name='ch')
-@commands.has_permissions(manage_channels=True)
-async def create_channel(ctx, *, channel_name: str):
-    """Creates a new text channel. User must have 'Manage Channels' permission."""
-    try:
-        new_channel = await ctx.guild.create_text_channel(name=channel_name)
-        await ctx.reply(f"✅ **Success!** Channel `#{new_channel.name}` has been created.")
-    except discord.Forbidden:
-        await ctx.reply("❌ **Error:** I don't have the required permissions to create channels.")
-    except Exception as e:
-        await ctx.reply(f"❌ **An unexpected error occurred:** {e}")
-
-# --- Main Execution ---
+# --- RUN THE BOT ---
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        logger.critical("FATAL: DISCORD_BOT_TOKEN is not set in the environment or .env file.")
+    if DISCORD_BOT_TOKEN:
+        bot.run(DISCORD_BOT_TOKEN)
     else:
-        bot.run(BOT_TOKEN)
+        print("Error: DISCORD_BOT_TOKEN environment variable not found.")
+        print("Please set it in your hosting service (e.g., Render) or a .env file.")
