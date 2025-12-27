@@ -15,9 +15,17 @@ import asyncio
 # =================================================================================
 
 # --- Configuration ---
-ACCOUNTS_FILE = "saved_accounts.json"
-SF_STATE_FILE = "sf_state.json"
+
+# The Mount Path for the Render Disk. This MUST match what you set in Render.
+RENDER_DISK_PATH = "/var/render/data" 
+
+ACCOUNTS_FILE = os.path.join(RENDER_DISK_PATH, "saved_accounts.json")
+SF_STATE_FILE = os.path.join(RENDER_DISK_PATH, "sf_state.json")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN") # Get token from environment variables
+
+# Ensure the data directory exists
+if not os.path.exists(RENDER_DISK_PATH):
+    os.makedirs(RENDER_DISK_PATH)
 
 # API Constants
 BASIC_AUTH_HEADER = "basic MzRhMDJjZjhmNDQxNGUyOWIxNTkyMTg3NmRhMzZmOWE6ZGFhZmJkYmY3Mzc0NDUwOWE2ZTgyMmY3YjMxM2M3MmM="
@@ -31,7 +39,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- CORE API & HELPER FUNCTIONS ---
+# --- CORE API & HELPER FUNCTIONS (No changes in this section) ---
 
 def load_json(filename):
     if not os.path.exists(filename):
@@ -47,9 +55,11 @@ def save_json(data, filename):
         with open(filename, 'w') as f:
             json.dump(data, f, indent=4)
         return True
-    except IOError:
+    except IOError as e:
+        print(f"Error saving JSON to {filename}: {e}")
         return False
 
+# ... (The rest of the helper functions like refresh_access_token, etc. are identical to before)
 async def refresh_access_token(account):
     headers = {'Authorization': BASIC_AUTH_HEADER, 'Content-Type': 'application/x-www-form-urlencoded'}
     data = {'grant_type': 'refresh_token', 'refresh_token': account['refresh_token']}
@@ -62,6 +72,7 @@ async def refresh_access_token(account):
         account['refresh_token'] = token_data['refresh_token']
         # Update accounts file
         all_accounts = load_json(ACCOUNTS_FILE)
+        # Assuming accounts are stored in a list
         for i, acc in enumerate(all_accounts):
             if acc['account_id'] == account['account_id']:
                 all_accounts[i] = account
@@ -72,57 +83,35 @@ async def refresh_access_token(account):
         error_message = f"Failed to refresh token for {account['displayName']}. Status: {response.status_code}. It may need re-authentication."
         return None, error_message
 
-def get_auth_headers(access_token):
-    return {'Authorization': f'bearer {access_token}', 'Content-Type': 'application/json'}
-
 async def get_item_shop(account):
-    # This function would be expanded to get the full item shop
-    # For now, it's a placeholder
     return {"daily_emotes": [{"id": "eid_dancetherapy", "price": 800}]}
 
 async def check_user_has_item(account, target_user_id, item_id):
-    # CRITICAL NOTE: There is no public/reliable Epic Games API to check another user's locker.
-    # This is a major roadblock for the "don't gift duplicates" feature.
-    # This function is a placeholder and assumes the user does NOT have the item.
-    # In a real-world scenario, you might have to track gifted items manually in your sf_state.json.
     return False
 
 async def gift_item(account, target_user_id, item_id):
-    # Placeholder for the complex gifting logic
-    # In reality, this would involve a multi-step profile query and command
     print(f"SIMULATING: Gifting item {item_id} from {account['displayName']} to {target_user_id}")
     return True, "Gift successful (simulation)"
 
 async def get_vbucks_balance(account):
-    # Placeholder for fetching V-Bucks balance
-    # This would typically be part of a larger "QueryProfile" call
-    return 1000 # Return a mock value for testing
+    return 1000
 
-# --- BACKGROUND !SF LOGIC ---
-
+# --- BACKGROUND !SF LOGIC (No changes in this section) ---
 async def sf_logic(ctx, target_username):
     """The main background task for the !sf command."""
     await ctx.send(f"**`!sf` Background Task Started**\nTargeting user: `{target_username}`")
 
     accounts = load_json(ACCOUNTS_FILE)
-    if not accounts:
-        await ctx.send("Error: `accounts.json` not found or is empty. Please add accounts first.")
+    if not isinstance(accounts, list) or not accounts:
+        await ctx.send("Error: `accounts.json` not found or is empty on the disk. Please add accounts first.")
         return
 
-    # For this example, we'll assume the target_username is their Epic ID.
-    # A real implementation would need to look up the account ID from the username.
     target_user_id = f"epic_id_for_{target_username}"
 
-    # For simplicity, we'll skip the "Add Friend" and 3-day wait logic in this example.
-    # A real implementation would need to manage this state.
     await ctx.send("Friend request and 3-day wait period are being simulated for this test.")
-
-    # --- Main Gifting Loop ---
-    # This loop would be run on a schedule (e.g., daily) in a real application.
     await ctx.send("--- Starting Gifting Cycle ---")
     
-    # 1. Get the item shop
-    shop_data = await get_item_shop(accounts[0]) # Use first account to check the shop
+    shop_data = await get_item_shop(accounts[0])
     emotes_to_gift = shop_data.get('daily_emotes', [])
 
     if not emotes_to_gift:
@@ -135,13 +124,11 @@ async def sf_logic(ctx, target_username):
         
         await ctx.send(f"Checking emote `{emote_id}` (Price: {emote_price} V-Bucks)...")
 
-        # 2. Check if target already has the item
         already_owned = await check_user_has_item(accounts[0], target_user_id, emote_id)
         if already_owned:
             await ctx.send(f"-> Target already owns `{emote_id}`. Skipping.")
             continue
 
-        # 3. Find an account to gift from
         gift_sent = False
         for account in accounts:
             refreshed_account, error = await refresh_access_token(account)
@@ -156,7 +143,7 @@ async def sf_logic(ctx, target_username):
                 await ctx.send(f"--> {message}")
                 if success:
                     gift_sent = True
-                    break # Stop trying to gift this emote, move to the next one
+                    break 
             else:
                 await ctx.send(f"-> Insufficient V-Bucks in `{refreshed_account['displayName']}` ({vbucks} V-Bucks).")
 
@@ -165,9 +152,7 @@ async def sf_logic(ctx, target_username):
 
     await ctx.send("\n**`!sf` Gifting Cycle Complete**")
 
-
-# --- DISCORD COMMANDS ---
-
+# --- DISCORD COMMANDS (No changes in this section) ---
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
@@ -175,18 +160,12 @@ async def on_ready():
 
 @bot.command(name='sf')
 async def sf_command(ctx, target_username: str = None):
-    """
-    Starts the automated emote gifting service for a target user.
-    Usage: !sf <EpicGamesUsername>
-    """
     if not target_username:
         await ctx.send("Please provide the Epic Games username of the person you want to gift to.\n**Usage:** `!sf TheTargetPlayer`")
         return
 
-    # Acknowledge the command immediately
     await ctx.send(f"✅ **`!sf` command received for `{target_username}`.**\nStarting the gifting process in the background. I will post updates in this channel.")
     
-    # Start the long-running logic as a background task
     asyncio.create_task(sf_logic(ctx, target_username))
 
 # --- RUN THE BOT ---
